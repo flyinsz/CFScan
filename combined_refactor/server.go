@@ -1,0 +1,839 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"runtime/debug"
+	"strings"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+const (
+	wsPingInterval  = 30 * time.Second
+	wsWriteDeadline = 10 * time.Second
+	wsReadDeadline  = 90 * time.Second
+)
+
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		fmt.Println("WebSocket 升级失败:", err)
+		return
+	}
+
+	session := &appSession{ws: ws}
+	defer func() {
+		if session.shouldCancelOnDisconnect() {
+			session.cancelTaskSilently()
+		}
+		ws.Close()
+	}()
+
+	ws.SetReadDeadline(time.Now().Add(wsReadDeadline))
+	ws.SetPongHandler(func(string) error {
+		ws.SetReadDeadline(time.Now().Add(wsReadDeadline))
+		return nil
+	})
+
+	pingStop := make(chan struct{})
+	defer close(pingStop)
+	safeGo("ws-ping", session, func() {
+		ticker := time.NewTicker(wsPingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pingStop:
+				return
+			case <-ticker.C:
+				session.wsMutex.Lock()
+				if session.wsClosed {
+					session.wsMutex.Unlock()
+					return
+				}
+				err := ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteDeadline))
+				session.wsMutex.Unlock()
+				if err != nil {
+					return
+				}
+			}
+		}
+	})
+
+	cfCountry := ""
+	cfCountryOK := false
+	if !skipGeoCheck {
+		ctx, cancel := context.WithTimeout(r.Context(), 7*time.Second)
+		cfCountry, cfCountryOK = detectCloudflareTraceCountry(ctx)
+		cancel()
+	}
+	defaultSpeedURL, speedISP, speedISPErr := resolveStartupSpeedTestURL(r.Context(), speedTestURL)
+	if speedISPErr != nil {
+		recordDebugError("speed_isp_check", speedISPErr.Error())
+	}
+	if speedISPErr == nil {
+		recordDebugByLevel("all", "speed_isp_check", fmt.Sprintf("asn=%d org=%s mobile=%v selected=%s", speedISP.ASN, speedISP.ASOrganization, isChinaMobileISP(speedISP), currentAutoSpeedURLDefault()))
+	}
+	session.sendWSMessage("init_config", map[string]interface{}{
+		"speedTestURL":     speedTestURL,
+		"speedTestDefault": defaultSpeedURL,
+		"speedTestWorkers": speedTestWorkers,
+		"debug":            debugMode,
+		"version":          appVersion,
+		"releaseURL":       releaseLatestURL,
+		"cfCountry":        cfCountry,
+		"proxyWarning":     !skipGeoCheck && (!cfCountryOK || shouldWarnProxyCountry(cfCountry)),
+		"geoCheckOK":       cfCountryOK,
+		"skipGeoCheck":     skipGeoCheck,
+		"speedURLStatus":   speedURLStatusPayload(),
+		"proxyStatus":      map[string]interface{}{"configured": managementProxyConfigured(), "source": proxySourceLabel()},
+	})
+	if backgroundSession := currentBackgroundTaskSession(); backgroundSession != nil {
+		session.sendWSMessage("background_task_found", backgroundSession.backgroundSummary())
+	}
+	safeGo("version-check", session, func() {
+		ctx, cancel := context.WithTimeout(r.Context(), 7*time.Second)
+		defer cancel()
+		info, err := getLatestRelease(ctx)
+		if err != nil {
+			recordDebugError("version_check", err.Error())
+			session.sendWSMessage("version_info", map[string]interface{}{"version": appVersion, "releaseURL": releaseLatestURL, "error": err.Error()})
+			return
+		}
+		session.sendWSMessage("version_info", map[string]interface{}{"version": appVersion, "latest": info.TagName, "releaseURL": releaseLatestURL, "hasUpdate": versionIsOlder(appVersion, info.TagName)})
+	})
+
+	safeHandler := func(name string, fn func(json.RawMessage), data json.RawMessage) {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("handler %s panic: %v\n%s\n", name, r, debug.Stack())
+				recordProgramDebugError("handler_panic", fmt.Sprintf("%s: %v\n%s", name, r, debug.Stack()))
+				session.sendWSMessage("error", fmt.Sprintf("内部错误（%s），请重试；若持续发生请查看后端日志", name))
+				session.cancelTaskSilently()
+			}
+		}()
+		fn(data)
+	}
+
+	handlers := map[string]func(json.RawMessage){
+		"start_task": func(data json.RawMessage) {
+			var params startTaskRequest
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "start_task 参数解析失败")
+				return
+			}
+			if params.Threads <= 0 {
+				params.Threads = 100
+			}
+			if params.Port <= 0 {
+				params.Port = 443
+			}
+			if params.Delay < 0 {
+				params.Delay = 0
+			}
+			scanMode := params.ScanMode
+			if scanMode == "" {
+				scanMode = scanModeTCPing
+			}
+			autoSpeed := params.AutoSpeed && params.OfficialSpeedLimit > 0
+			session.startTaskNamed("官方优选扫描", "official", map[string]interface{}{"ipType": params.IPType, "threads": params.Threads, "port": params.Port, "delay": params.Delay, "scanMode": scanMode, "autoSpeed": autoSpeed}, func(ctx context.Context, session *appSession) {
+				runOfficialTask(ctx, session, params.IPType, params.Threads, params.Port, params.Delay, scanMode)
+				if ctx.Err() != nil || !autoSpeed || !session.isBackgroundTask() {
+					return
+				}
+				dc := strings.TrimSpace(params.OfficialTargetDC)
+				if dc == "" {
+					session.scanMutex.Lock()
+					copy := append([]ScanResult(nil), session.scanResults...)
+					session.scanMutex.Unlock()
+					dc = pickBestDataCenter(copy)
+				}
+				if dc == "" || ctx.Err() != nil {
+					return
+				}
+				runDetailedTest(ctx, session, dc, params.OfficialSpeedPort, params.Delay, scanMode)
+				if ctx.Err() != nil || !session.isBackgroundTask() || params.OfficialSpeedLimit <= 0 {
+					return
+				}
+				speedURL := strings.TrimSpace(params.OfficialSpeedURL)
+				if speedURL == "" || isAutoSpeedURL(speedURL) {
+					speedURL = speedTestURL
+				}
+				session.testMutex.Lock()
+				results := append([]TestResult(nil), session.testResults...)
+				session.testMutex.Unlock()
+				if len(results) > 0 {
+					runOfficialSpeedBatch(ctx, session, params.OfficialSpeedPort, speedURL, params.OfficialSpeedLimit, params.OfficialSpeedMin, results, false)
+				}
+			})
+		},
+		"start_test": func(data json.RawMessage) {
+			var params startTestRequest
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "start_test 参数解析失败")
+				return
+			}
+			if params.Port <= 0 {
+				params.Port = 443
+			}
+			if params.Delay < 0 {
+				params.Delay = 0
+			}
+			scanMode := params.ScanMode
+			if scanMode == "" {
+				scanMode = scanModeTCPing
+			}
+			session.startTaskNamed("官方详细测试", "official", map[string]interface{}{"dc": params.DC, "port": params.Port, "delay": params.Delay, "scanMode": scanMode}, func(ctx context.Context, session *appSession) {
+				runDetailedTest(ctx, session, params.DC, params.Port, params.Delay, scanMode)
+			})
+		},
+		"start_speed_test": func(data json.RawMessage) {
+			var params startSpeedTestRequest
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "start_speed_test 参数解析失败")
+				return
+			}
+			if params.Port <= 0 {
+				params.Port = 443
+			}
+			session.startTaskNamed("单 IP 测速", "official", map[string]interface{}{"ip": params.IP, "port": params.Port, "url": params.URL}, func(ctx context.Context, session *appSession) {
+				runSpeedTest(ctx, session, params.IP, params.Port, params.URL)
+			})
+		},
+		"start_official_speed_batch": func(data json.RawMessage) {
+			var params startOfficialSpeedBatchRequest
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "start_official_speed_batch 参数解析失败")
+				return
+			}
+			if params.Port <= 0 {
+				params.Port = 443
+			}
+			if params.SpeedLimit < 0 {
+				params.SpeedLimit = 0
+			}
+			if params.SpeedMin <= 0 {
+				params.SpeedMin = 0.1
+			}
+			if strings.TrimSpace(params.URL) == "" {
+				params.URL = speedTestURL
+			}
+			session.startTaskNamed("官方批量测速", "official", map[string]interface{}{"port": params.Port, "url": params.URL, "speedLimit": params.SpeedLimit, "speedMin": params.SpeedMin, "skipTested": params.SkipTested}, func(ctx context.Context, session *appSession) {
+				runOfficialSpeedBatch(ctx, session, params.Port, params.URL, params.SpeedLimit, params.SpeedMin, params.Results, params.SkipTested)
+			})
+		},
+		"start_nsb_task": func(data json.RawMessage) {
+			var params startNSBTaskRequest
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "start_nsb_task 参数解析失败")
+				return
+			}
+			if params.MaxThreads <= 0 {
+				params.MaxThreads = speedTestWorkers
+			}
+			if params.SpeedTest < 0 {
+				params.SpeedTest = 0
+			}
+			if params.Delay < 0 {
+				params.Delay = 0
+			}
+			if params.ResultLimit < 0 {
+				params.ResultLimit = 0
+			}
+			if params.SpeedLimit < 0 {
+				params.SpeedLimit = 0
+			}
+			if params.SpeedMin < 0 {
+				params.SpeedMin = 0
+			}
+			if strings.TrimSpace(params.SpeedURL) == "" {
+				params.SpeedURL = speedTestURL
+			}
+			if strings.TrimSpace(params.OutFile) == "" {
+				params.OutFile = "ip.csv"
+			}
+			hasFileContent := strings.TrimSpace(params.FileContent) != ""
+			hasSourceURL := strings.TrimSpace(params.SourceURL) != ""
+			if hasFileContent == hasSourceURL {
+				session.sendWSMessage("error", "请选择本地文件或网络URL（二选一）")
+				return
+			}
+			if hasSourceURL {
+				parsedURL, err := url.Parse(params.SourceURL)
+				if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" {
+					session.sendWSMessage("error", "网络URL必须是有效的 http/https 地址")
+					return
+				}
+			}
+			scanMode := params.ScanMode
+			if scanMode == "" {
+				scanMode = scanModeTCPing
+			}
+			session.startTaskNamed("非标优选", "nsb", map[string]interface{}{"fileName": params.FileName, "sourceURL": params.SourceURL, "outFile": params.OutFile, "maxThreads": params.MaxThreads, "fallbackPort": params.FallbackPort, "speedTest": params.SpeedTest, "speedURL": params.SpeedURL, "enableTLS": params.EnableTLS, "delay": params.Delay, "resultLimit": params.ResultLimit, "dc": params.DC, "speedMin": params.SpeedMin, "speedLimit": params.SpeedLimit, "compact": params.Compact, "scanMode": scanMode}, func(ctx context.Context, session *appSession) {
+				fileName := params.FileName
+				fileContent := params.FileContent
+				if hasSourceURL {
+					session.sendWSMessage("log", "正在获取非标网络输入: "+params.SourceURL)
+					content, err := getURLContentViaProxy(ctx, params.SourceURL)
+					if err != nil {
+						if ctx.Err() != nil {
+							return
+						}
+						session.sendWSMessage("error", "获取非标网络输入失败: "+err.Error())
+						return
+					}
+					fileName = params.SourceURL
+					fileContent = content
+				}
+				runNSBTask(ctx, session, fileName, fileContent, params.OutFile, params.MaxThreads, params.FallbackPort, params.SpeedTest, params.SpeedURL, params.EnableTLS, params.Delay, params.ResultLimit, params.DC, params.SpeedMin, params.SpeedLimit, params.Compact, scanMode, params.RelinkHost)
+			})
+		},
+		"start_nsb_reallink": func(data json.RawMessage) {
+			var params startNSBReallinkRequest
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "start_nsb_reallink 参数解析失败")
+				return
+			}
+			params.RelinkHost = strings.TrimSpace(params.RelinkHost)
+			if params.RelinkHost == "" {
+				session.sendWSMessage("error", "链路复验未配置探针域名（relinkhost）")
+				return
+			}
+			if params.SpeedTest < 0 {
+				params.SpeedTest = 0
+			}
+			if params.SpeedLimit < 0 {
+				params.SpeedLimit = 0
+			}
+			if params.SpeedMin < 0 {
+				params.SpeedMin = 0
+			}
+			if strings.TrimSpace(params.SpeedURL) == "" {
+				params.SpeedURL = speedTestURL
+			}
+			if strings.TrimSpace(params.OutFile) == "" {
+				params.OutFile = "ip.csv"
+			}
+			if len(params.Results) == 0 {
+				session.sendWSMessage("error", "没有可复验的非标结果")
+				return
+			}
+			scanMode := params.ScanMode
+			if scanMode == "" {
+				scanMode = scanModeTCPing
+			}
+			session.startTaskNamed("链路复验", "nsb", map[string]interface{}{"outFile": params.OutFile, "speedTest": params.SpeedTest, "speedLimit": params.SpeedLimit}, func(ctx context.Context, session *appSession) {
+				runNSBReallinkTask(ctx, session, params.Results, params.RelinkHost, params.SpeedTest, params.SpeedURL, params.EnableTLS, params.SpeedMin, params.SpeedLimit, params.Compact, scanMode, params.OutFile)
+			})
+		},
+		"start_nsb_speed_batch": func(data json.RawMessage) {
+			var params startNSBSpeedBatchRequest
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "start_nsb_speed_batch 参数解析失败")
+				return
+			}
+			if params.SpeedTest < 0 {
+				params.SpeedTest = 0
+			}
+			if params.SpeedLimit < 0 {
+				params.SpeedLimit = 0
+			}
+			if params.SpeedMin <= 0 {
+				params.SpeedMin = 0.1
+			}
+			if strings.TrimSpace(params.SpeedURL) == "" {
+				params.SpeedURL = speedTestURL
+			}
+			if len(params.Results) == 0 {
+				session.sendWSMessage("error", "没有可测速的非标结果")
+				return
+			}
+			session.startTaskNamed("非标批量测速", "nsb", map[string]interface{}{"speedTest": params.SpeedTest, "speedURL": params.SpeedURL, "enableTLS": params.EnableTLS, "speedMin": params.SpeedMin, "speedLimit": params.SpeedLimit, "skipTested": params.SkipTested, "compact": params.Compact}, func(ctx context.Context, session *appSession) {
+				runNSBSpeedBatch(ctx, session, params.Results, params.SpeedTest, params.SpeedURL, params.EnableTLS, params.SpeedMin, params.SpeedLimit, params.SkipTested, params.Compact)
+			})
+		},
+		"stop_task": func(data json.RawMessage) {
+			if backgroundSession := currentBackgroundTaskSession(); backgroundSession != nil {
+				if session != backgroundSession {
+					backgroundSession.attachWebSocket(ws)
+					session = backgroundSession
+				}
+				backgroundSession.stopTask()
+				return
+			}
+			session.stopTask()
+		},
+		"run_in_background": func(data json.RawMessage) {
+			if !session.enableBackgroundTask() {
+				session.sendWSMessage("error", "当前没有可转入后台的运行任务")
+				return
+			}
+			session.sendWSMessage("background_task_enabled", session.backgroundSummary())
+			session.sendWSMessage("log", "当前任务已转入后台运行")
+		},
+		"follow_background_task": func(data json.RawMessage) {
+			backgroundSession := currentBackgroundTaskSession()
+			if backgroundSession == nil {
+				session.sendWSMessage("error", "当前没有可跟随的后台任务")
+				return
+			}
+			backgroundSession.attachWebSocket(ws)
+			session = backgroundSession
+			snapshot := backgroundSession.backgroundSummary()
+			backgroundSession.sendWSMessage("background_task_following", snapshot)
+
+			if !snapshot.Running && snapshot.Mode == "official" {
+				backgroundSession.scanMutex.Lock()
+				scanResults := append([]ScanResult(nil), backgroundSession.scanResults...)
+				backgroundSession.scanMutex.Unlock()
+				if len(scanResults) > 0 {
+					backgroundSession.sendWSMessage("scan_complete_wait_dc", buildDCList(scanResults))
+				}
+				backgroundSession.testMutex.Lock()
+				results := append([]TestResult(nil), backgroundSession.testResults...)
+				backgroundSession.testMutex.Unlock()
+				if len(results) > 0 {
+					for _, res := range results {
+						backgroundSession.sendWSMessage("test_result", res)
+					}
+					backgroundSession.sendWSMessage("test_complete", results)
+				}
+			}
+
+			if !snapshot.Running && snapshot.Phase == "完成" {
+				backgroundSession.nsbMutex.Lock()
+				payload := backgroundSession.nsbCompletePayload
+				backgroundSession.nsbMutex.Unlock()
+				if payload != nil {
+					backgroundSession.sendWSMessage("nsb_csv_complete", *payload)
+				}
+			}
+		},
+		"get_background_task_status": func(data json.RawMessage) {
+			backgroundSession := currentBackgroundTaskSession()
+			if backgroundSession == nil {
+				session.sendWSMessage("background_task_missing", nil)
+				return
+			}
+			session.sendWSMessage("background_task_update", backgroundSession.backgroundSummary())
+		},
+		"compact_ipv4": func(data json.RawMessage) {
+			session.startTaskNamed("IPv4 地址库精简", "official", nil, func(ctx context.Context, session *appSession) {
+				runCompactIPv4Task(ctx, session)
+			})
+		},
+		"reset_all_config": func(data json.RawMessage) {
+			resetAllConfigFiles(session)
+		},
+		"get_speed_url_status": func(data json.RawMessage) {
+			session.sendWSMessage("speed_url_status", speedURLStatusPayload())
+		},
+		"get_management_proxy": func(data json.RawMessage) {
+			session.sendWSMessage("proxy_status", map[string]interface{}{"configured": managementProxyConfigured(), "label": proxyStatusLabel(), "source": proxySourceLabel()})
+		},
+		"set_management_proxy": func(data json.RawMessage) {
+			var params struct {
+				Value string `json:"value"`
+			}
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "set_management_proxy 参数解析失败")
+				return
+			}
+			value := strings.TrimSpace(params.Value)
+			if err := setManagementProxy(value); err != nil {
+				session.sendWSMessage("error", "代理设置无效: "+err.Error())
+				return
+			}
+			status := map[string]interface{}{"configured": managementProxyConfigured(), "label": proxyStatusLabel(), "source": proxySourceLabel()}
+			saveErr := updateProxyInConfigFile(defaultCLIConfigPath(), managementProxyRaw)
+			if saveErr != nil {
+				status["saved"] = false
+				status["message"] = "代理已生效但写入配置文件失败，重启后失效: " + saveErr.Error()
+			} else {
+				status["saved"] = true
+			}
+			if value == "" {
+				if saveErr != nil {
+					status["message"] = "代理已清除但写入配置文件失败，重启后旧代理将重新生效: " + saveErr.Error()
+				} else {
+					status["message"] = "代理已清除（回退系统环境变量代理）"
+				}
+			}
+			session.sendWSMessage("proxy_updated", status)
+		},
+		"get_config": func(data json.RawMessage) {
+			cfgPath := defaultCLIConfigPath()
+			raw, err := os.ReadFile(cfgPath)
+			if err != nil {
+				session.sendWSMessage("error", "读取配置文件失败: "+err.Error())
+				return
+			}
+			var parsed interface{}
+			if err := json.Unmarshal(raw, &parsed); err != nil {
+				session.sendWSMessage("error", "解析配置文件失败: "+err.Error())
+				return
+			}
+			session.sendWSMessage("config_data", parsed)
+		},
+		"check_proxy_country": func(data json.RawMessage) {
+			if skipGeoCheck {
+				session.sendWSMessage("proxy_country_result", map[string]interface{}{"cfCountry": "SKIPPED", "proxyWarning": false, "skipGeoCheck": true})
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 7*time.Second)
+			country, countryOK := detectCloudflareTraceCountry(ctx)
+			cancel()
+			session.sendWSMessage("proxy_country_result", map[string]interface{}{"cfCountry": country, "proxyWarning": !countryOK || shouldWarnProxyCountry(country), "geoCheckOK": countryOK})
+		},
+		"github_upload": func(data json.RawMessage) {
+			var params githubUploadRequest
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "github_upload 参数解析失败")
+				return
+			}
+			safeGo("github-upload", session, func() {
+				downloadURL, err := uploadGitHubContentWithRetry(r.Context(), params, func(attempt, total int, err error) {
+					if params.Silent {
+						return
+					}
+					if err == nil {
+						session.sendWSMessage("github_upload_status", map[string]interface{}{"attempt": attempt, "total": total, "message": fmt.Sprintf("第 %d/%d 次上传中", attempt, total)})
+						return
+					}
+					session.sendWSMessage("github_upload_status", map[string]interface{}{"attempt": attempt, "total": total, "message": fmt.Sprintf("第 %d/%d 次上传失败，准备重试: %s", attempt, total, err.Error())})
+				})
+				if err != nil {
+					session.sendWSMessage("github_upload_error", map[string]interface{}{"path": params.Path, "message": "上传 GitHub 失败: " + err.Error() + "（可在设置菜单配置代理后重试）", "silent": params.Silent})
+					return
+				}
+				session.sendWSMessage("github_upload_result", map[string]interface{}{"path": params.Path, "rawURL": downloadURL, "silent": params.Silent})
+			})
+		},
+		"edgetunnel_upload": func(data json.RawMessage) {
+			var params edgetunnelUploadRequest
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "edgetunnel_upload 参数解析失败")
+				return
+			}
+			safeGo("edgetunnel-upload", session, func() {
+				err := uploadToEdgetunnel(r.Context(), params, func(msg string) {
+					if !params.Silent {
+						session.sendWSMessage("edgetunnel_upload_status", map[string]interface{}{"message": msg})
+					}
+				})
+				if err != nil {
+					session.sendWSMessage("edgetunnel_upload_error", map[string]interface{}{"message": "edgetunnel 上传失败: " + err.Error() + "（可在设置菜单配置代理后重试）", "silent": params.Silent})
+					return
+				}
+				session.sendWSMessage("edgetunnel_upload_result", map[string]interface{}{"message": "上传成功", "silent": params.Silent})
+			})
+		},
+	}
+
+	for {
+		_, msg, err := ws.ReadMessage()
+		if err != nil {
+			recordDebugNotice("websocket_read", err.Error())
+			break
+		}
+
+		var request wsRequest
+		if err := json.Unmarshal(msg, &request); err != nil {
+			session.sendWSMessage("error", "请求格式错误")
+			continue
+		}
+
+		handler, ok := handlers[request.Type]
+		if !ok {
+			session.sendWSMessage("error", "未知请求类型")
+			continue
+		}
+		safeHandler(request.Type, handler, request.Data)
+	}
+}
+
+const githubUploadMaxAttempts = 3
+
+func uploadGitHubContentWithRetry(ctx context.Context, params githubUploadRequest, onAttempt func(attempt, total int, err error)) (string, error) {
+	var lastErr error
+	for attempt := 1; attempt <= githubUploadMaxAttempts; attempt++ {
+		if onAttempt != nil {
+			onAttempt(attempt, githubUploadMaxAttempts, nil)
+		}
+		downloadURL, err := uploadGitHubContent(ctx, params)
+		if err == nil {
+			return downloadURL, nil
+		}
+		lastErr = err
+		recordDebugError("github_upload_attempt", fmt.Sprintf("attempt=%d/%d path=%s err=%v", attempt, githubUploadMaxAttempts, params.Path, err))
+		if onAttempt != nil {
+			onAttempt(attempt, githubUploadMaxAttempts, err)
+		}
+		if attempt < githubUploadMaxAttempts {
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
+		}
+	}
+	return "", lastErr
+}
+
+func uploadGitHubContent(ctx context.Context, params githubUploadRequest) (string, error) {
+	params.Token = strings.TrimSpace(params.Token)
+	params.Owner = strings.TrimSpace(params.Owner)
+	params.Repo = strings.TrimSpace(params.Repo)
+	params.Branch = strings.TrimSpace(params.Branch)
+	params.Path = strings.Trim(strings.TrimSpace(params.Path), "/")
+	params.Message = strings.TrimSpace(params.Message)
+	if params.Token == "" || params.Owner == "" || params.Repo == "" || params.Path == "" || strings.TrimSpace(params.Content) == "" {
+		return "", fmt.Errorf("token、仓库、路径和内容不能为空")
+	}
+	if params.Branch == "" {
+		params.Branch = "main"
+	}
+	if params.Message == "" {
+		params.Message = "update cfdata results"
+	}
+
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s", url.PathEscape(params.Owner), url.PathEscape(params.Repo), escapeGitHubContentPath(params.Path))
+	sha, err := getGitHubContentSHA(ctx, apiURL, params.Token, params.Branch)
+	if err != nil {
+		return "", err
+	}
+	payload := map[string]string{
+		"message": params.Message,
+		"content": base64.StdEncoding.EncodeToString([]byte(params.Content)),
+		"branch":  params.Branch,
+	}
+	if sha != "" {
+		payload["sha"] = sha
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	setGitHubHeaders(req, params.Token)
+	resp, err := managementHTTPClient(0).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("GitHub API 返回 %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	io.Copy(io.Discard, resp.Body)
+	return githubRawURL(params), nil
+}
+
+func githubRawURL(params githubUploadRequest) string {
+	branch := strings.TrimSpace(params.Branch)
+	if branch == "" {
+		branch = "main"
+	}
+	path := strings.Trim(strings.TrimSpace(params.Path), "/")
+	return fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/refs/heads/%s/%s", url.PathEscape(strings.TrimSpace(params.Owner)), url.PathEscape(strings.TrimSpace(params.Repo)), url.PathEscape(branch), escapeGitHubContentPath(path))
+}
+
+func getGitHubContentSHA(ctx context.Context, apiURL, token, branch string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL+"?ref="+url.QueryEscape(branch), nil)
+	if err != nil {
+		return "", err
+	}
+	setGitHubHeaders(req, token)
+	resp, err := managementHTTPClient(0).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", nil
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("查询 GitHub 文件失败 %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	var payload struct {
+		SHA string `json:"sha"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", err
+	}
+	return payload.SHA, nil
+}
+
+func setGitHubHeaders(req *http.Request, token string) {
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "cfdata")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+}
+
+func buildDCList(scanResults []ScanResult) []DataCenterInfo {
+	dcMap := make(map[string]*DataCenterInfo)
+	for _, res := range scanResults {
+		if _, ok := dcMap[res.DataCenter]; !ok {
+			dcMap[res.DataCenter] = &DataCenterInfo{
+				DataCenter: res.DataCenter,
+				DCCountry:  res.DCCountry,
+				City:       res.City,
+				IPCount:    0,
+				MinLatency: 999999,
+			}
+		}
+		info := dcMap[res.DataCenter]
+		info.IPCount++
+		if lat := int(res.TCPDuration / time.Millisecond); lat < info.MinLatency {
+			info.MinLatency = lat
+		}
+	}
+	dcList := make([]DataCenterInfo, 0, len(dcMap))
+	for _, info := range dcMap {
+		dcList = append(dcList, *info)
+	}
+	return dcList
+}
+
+func escapeGitHubContentPath(path string) string {
+	parts := strings.Split(path, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
+}
+
+func normalizeEdgetunnelHost(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return host
+	}
+	if !strings.HasPrefix(host, "http://") && !strings.HasPrefix(host, "https://") {
+		host = "https://" + host
+	}
+	return strings.TrimRight(host, "/")
+}
+
+func edgetunnelLogin(ctx context.Context, host, password string) (*http.Cookie, error) {
+	loginURL := host + "/login"
+	body := strings.NewReader("password=" + url.QueryEscape(password))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, loginURL, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := managementHTTPClient(0).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("登录失败 %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	contentType := resp.Header.Get("Content-Type")
+	if strings.Contains(contentType, "text/html") {
+		return nil, fmt.Errorf("密码错误")
+	}
+	cookies := resp.Cookies()
+	for _, c := range cookies {
+		if c.Name != "" {
+			return c, nil
+		}
+	}
+	return nil, fmt.Errorf("登录成功但未获取到 cookie")
+}
+
+func edgetunnelRead(ctx context.Context, host string, cookie *http.Cookie) (string, error) {
+	readURL := fmt.Sprintf("%s/admin/ADD.txt?_t=%d", host, time.Now().Unix())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, readURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.AddCookie(cookie)
+	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	resp, err := managementHTTPClient(0).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+func edgetunnelWrite(ctx context.Context, host string, cookie *http.Cookie, content string) error {
+	writeURL := host + "/admin/ADD.txt"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, writeURL, strings.NewReader(content))
+	if err != nil {
+		return err
+	}
+	req.AddCookie(cookie)
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := managementHTTPClient(0).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("上传失败 %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	var result struct {
+		Success bool `json:"success"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil || !result.Success {
+		return fmt.Errorf("上传返回异常: %s", strings.TrimSpace(string(data)))
+	}
+	return nil
+}
+
+func uploadToEdgetunnel(ctx context.Context, params edgetunnelUploadRequest, onStatus func(string)) error {
+	params.Host = normalizeEdgetunnelHost(params.Host)
+	params.Password = strings.TrimSpace(params.Password)
+	params.Content = strings.TrimSpace(params.Content)
+	if params.Host == "" {
+		return fmt.Errorf("host 不能为空")
+	}
+	if params.Password == "" {
+		return fmt.Errorf("密码不能为空")
+	}
+	if params.Content == "" {
+		return fmt.Errorf("上传内容不能为空")
+	}
+	onStatus("正在登录...")
+	cookie, err := edgetunnelLogin(ctx, params.Host, params.Password)
+	if err != nil {
+		return fmt.Errorf("登录失败: %w", err)
+	}
+	if params.Mode == "append" {
+		onStatus("正在读取远程文件...")
+		remote, err := edgetunnelRead(ctx, params.Host, cookie)
+		if err != nil {
+			onStatus("读取远程文件失败，将覆盖上传")
+		} else if remote != "" && remote != "null" {
+			params.Content = remote + "\n" + params.Content
+		}
+	}
+	onStatus("正在上传...")
+	if err := edgetunnelWrite(ctx, params.Host, cookie, params.Content); err != nil {
+		return err
+	}
+	return nil
+}

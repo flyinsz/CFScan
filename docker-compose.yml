@@ -1,0 +1,21 @@
+# 部署前先执行 ./build.sh 生成 build/ 下的 linux/amd64 二进制；
+# 有外网时也可改用 Dockerfile（golang:1.26-alpine 多阶段构建）。
+services:
+  cfscan:
+    build:
+      context: .
+      dockerfile: Dockerfile.prebuilt
+    image: cfscan-docker:local
+    container_name: cfscan
+    restart: unless-stopped
+    stop_grace_period: 20s
+    env_file:
+      - .env
+    # 飞牛 NAS 的 bridge 网络出站受限，使用宿主网络保证 CF API / 扫描可达
+    network_mode: host
+    environment:
+      TZ: Asia/Shanghai
+      DATA_DIR: /data
+      CFSCAN_BIN: /usr/local/bin/cfscan
+    volumes:
+      - ./data:/data

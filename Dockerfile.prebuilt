@@ -1,0 +1,8 @@
+FROM scratch
+COPY build/cfscan /usr/local/bin/cfscan
+COPY build/cfscan-auto /usr/local/bin/cfscan-auto
+COPY build/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+WORKDIR /data
+VOLUME ["/data"]
+EXPOSE 13335
+ENTRYPOINT ["/usr/local/bin/cfscan-auto"]

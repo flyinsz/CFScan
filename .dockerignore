@@ -1,0 +1,12 @@
+.git
+.github
+data
+.env
+*.log
+*.md
+app
+img
+gradle*
+*.gradle
+gradlew*
+package*.json

@@ -1630,6 +1630,7 @@
                         d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 3.86c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
                 </svg>
             </a>
+            <button class="settings-toggle" id="btnAutoTask" onclick="openAutoModal()" title="CFNext 定时自动优选与上报">🚀</button>
             <button class="settings-toggle" id="btnConfigMenu" onclick="toggleConfigMenu(event)" title="保存/加载配置">💾</button>
             <button class="settings-toggle" id="settingsToggle" onclick="toggleSettingsMenu(event)" title="设置">
                 <span id="themeIcon">⚙️</span>
@@ -2387,6 +2388,72 @@
             </div>
             <div class="modal-actions footer">
                 <button class="action-btn export-btn" onclick="applySortModal()">应用筛选排序</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-mask" id="autoModalMask">
+        <div class="result-modal" style="max-width:760px;max-height:88vh;overflow:auto;">
+            <div class="modal-head">
+                <h3>🚀 CFNext 定时自动优选与上报</h3>
+                <button class="modal-close" onclick="closeAutoModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="upload-status" id="autoStatusText">加载中…</div>
+
+                <div class="settings-title" style="margin-top:14px;">① 定时自动优选</div>
+                <div class="modal-grid">
+                    <div class="modal-field"><label class="inline-check"><input type="checkbox" id="autoEnabled"> 启用定时任务</label></div>
+                    <div class="modal-field"><label class="inline-check"><input type="checkbox" id="autoRunOnStart"> 容器启动时立即跑一次</label></div>
+                    <div class="modal-field">
+                        <label>调度方式</label>
+                        <select id="autoScheduleMode" onchange="onAutoScheduleModeChange()">
+                            <option value="interval">按间隔重复</option>
+                            <option value="daily">每日定点</option>
+                        </select>
+                    </div>
+                    <div class="modal-field" id="autoIntervalField"><label>间隔（6h / 30m / 1h20m）</label><input id="autoInterval" type="text"></div>
+                    <div class="modal-field" id="autoAtField" style="display:none;"><label>每日时刻 HH:MM</label><input id="autoAt" type="text" placeholder="08:30"></div>
+                    <div class="modal-field"><label>扫描方式</label><select id="autoScanMode"><option value="official">官方优选</option><option value="nsb">NSB 优选</option></select></div>
+                    <div class="modal-field"><label>结果行数</label><input id="autoScanRows" type="text"></div>
+                    <div class="modal-field"><label>线程数</label><input id="autoScanThreads" type="text"></div>
+                    <div class="modal-field"><label>合格延迟 (ms)</label><input id="autoScanDelay" type="text"></div>
+                    <div class="modal-field"><label>端口</label><input id="autoScanPort" type="text"></div>
+                    <div class="modal-field"><label>扫描超时</label><input id="autoScanTimeout" type="text" placeholder="45m"></div>
+                    <div class="modal-field"><label class="inline-check"><input type="checkbox" id="autoDryRun"> 干跑（不写入 CFNext）</label></div>
+                </div>
+
+                <div class="settings-title" style="margin-top:16px;">② CFNext 上报目标</div>
+                <div class="modal-grid">
+                    <div class="modal-field">
+                        <label>上报通道</label>
+                        <select id="autoChannel" onchange="onAutoChannelChange()">
+                            <option value="kv">Cloudflare KV API（直连）</option>
+                            <option value="panel">CFNext 面板 API</option>
+                            <option value="auto">自动：面板优先，失败回退 KV</option>
+                            <option value="dry">关闭上报（仅扫描）</option>
+                        </select>
+                    </div>
+                    <div class="modal-field"><label>最大优选 IP 数</label><input id="autoMaxIPs" type="text"></div>
+                    <div class="modal-field full"><label>面板地址（登录入口）</label><input id="autoPanelURL" type="text" placeholder="https://cfn.vipchanel.com/donny-admin"></div>
+                    <div class="modal-field"><label>管理员密码</label><input id="autoPanelPassword" type="password" autocomplete="new-password"></div>
+                    <div class="modal-field"><label>API 基址（留空自动发现）</label><input id="autoAPIBase" type="text" placeholder="自动从控制台读取 APIPATH"></div>
+                    <div class="modal-field"><label>X-CF-Api 密钥（可选）</label><input id="autoPanelAPIKey" type="password" autocomplete="new-password"></div>
+                    <div class="modal-field"><label class="inline-check"><input type="checkbox" id="autoSetSubMode"> 强制「自定义订阅」模式</label></div>
+                    <div class="modal-field full"><label>CF Account ID（KV 通道）</label><input id="autoCFAccount" type="text"></div>
+                    <div class="modal-field"><label>KV Namespace ID</label><input id="autoCFNamespace" type="text"></div>
+                    <div class="modal-field"><label>CF API Token</label><input id="autoCFToken" type="password" autocomplete="new-password"></div>
+                    <div class="modal-field"><label>HTTP 超时</label><input id="autoHTTPTimeout" type="text" placeholder="30s"></div>
+                </div>
+                <div class="upload-status" id="autoHint" style="margin-top:10px;line-height:1.6;">
+                    密码 / Token 以 AES-GCM 加密存入数据卷，界面只显示 ********；保存后调度器 2 秒内热加载，无需重启容器。
+                </div>
+            </div>
+            <div class="modal-actions footer">
+                <button class="action-btn export-btn" onclick="refreshAutoStatus()">🔄 刷新状态</button>
+                <button class="action-btn export-btn" onclick="testAutoConnection()">🔌 测试连接</button>
+                <button class="action-btn export-btn" onclick="runAutoOnce()">▶ 立即运行一次</button>
+                <button class="action-btn export-btn" onclick="saveAutoSettings()">💾 保存并生效</button>
             </div>
         </div>
     </div>
@@ -6747,6 +6814,177 @@
             }
         }
         window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', autoThemeBySystem);
+
+        /* ===== CFNext 定时自动优选与上报 ===== */
+        let autoSettingsCache = null;
+        let autoStatusTimer = null;
+        const autoEl = (id) => document.getElementById(id);
+        const autoPost = (url, body) => fetch(url, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        }).then(r => r.json());
+
+        function autoMsg(text, kind) {
+            const el = autoEl('autoStatusText');
+            if (!el) return;
+            el.textContent = text;
+            el.className = 'upload-status' + (kind ? ' ' + kind : '');
+        }
+
+        function openAutoModal() {
+            const mask = autoEl('autoModalMask');
+            if (!mask) return;
+            mask.classList.add('active');
+            loadAutoConfig();
+            refreshAutoStatus();
+            if (autoStatusTimer) clearInterval(autoStatusTimer);
+            autoStatusTimer = setInterval(() => {
+                if (mask.classList.contains('active')) refreshAutoStatus();
+            }, 5000);
+        }
+
+        function closeAutoModal() {
+            const mask = autoEl('autoModalMask');
+            if (mask) mask.classList.remove('active');
+            if (autoStatusTimer) { clearInterval(autoStatusTimer); autoStatusTimer = null; }
+        }
+
+        function onAutoScheduleModeChange() {
+            const daily = autoEl('autoScheduleMode').value === 'daily';
+            autoEl('autoIntervalField').style.display = daily ? 'none' : '';
+            autoEl('autoAtField').style.display = daily ? '' : 'none';
+        }
+
+        function onAutoChannelChange() {
+            const ch = autoEl('autoChannel').value;
+            const hints = {
+                kv: 'KV 通道：直连 api.cloudflare.com 读写 config 键，需填写 CF Account / Namespace / Token。',
+                panel: '面板通道：登录 /donny-admin，API 入口（/<uuid>）从控制台 APIPATH 自动发现，也可手动指定。',
+                auto: '自动通道：先试面板 API，失败回退 KV；两套凭据都建议填好。',
+                dry: '干跑：只做定时扫描，不写入 CFNext。'
+            };
+            const hint = autoEl('autoHint');
+            if (hint) hint.textContent = (hints[ch] || '') + ' 密码 / Token 以 AES-GCM 加密存入数据卷，界面只显示 ********；保存后 2 秒内热加载。';
+        }
+
+        async function loadAutoConfig() {
+            try {
+                const j = await fetch('/api/auto/config').then(r => r.json());
+                if (!j.ok) return autoMsg('读取配置失败：' + j.error, 'error');
+                const s = j.settings;
+                autoSettingsCache = s;
+                autoEl('autoEnabled').checked = !!s.auto_enabled;
+                autoEl('autoRunOnStart').checked = !!s.run_on_start;
+                autoEl('autoScheduleMode').value = s.auto_at ? 'daily' : 'interval';
+                autoEl('autoInterval').value = s.auto_interval || '6h';
+                autoEl('autoAt').value = s.auto_at || '';
+                autoEl('autoScanMode').value = s.scan_mode || 'official';
+                autoEl('autoScanRows').value = s.scan_rows || '20';
+                autoEl('autoScanThreads').value = s.scan_threads || '100';
+                autoEl('autoScanDelay').value = s.scan_delay || '300';
+                autoEl('autoScanPort').value = s.scan_port || '443';
+                autoEl('autoScanTimeout').value = s.scan_timeout || '45m';
+                autoEl('autoDryRun').checked = !!s.scan_dry_run;
+                autoEl('autoChannel').value = s.channel || 'kv';
+                autoEl('autoMaxIPs').value = s.max_ips || 100;
+                autoEl('autoPanelURL').value = s.panel_url || '';
+                autoEl('autoPanelPassword').value = s.panel_password || '';
+                autoEl('autoAPIBase').value = s.api_base || '';
+                autoEl('autoPanelAPIKey').value = s.panel_api_key || '';
+                autoEl('autoSetSubMode').checked = !!s.set_submode;
+                autoEl('autoCFAccount').value = s.cf_account_id || '';
+                autoEl('autoCFNamespace').value = s.cf_namespace_id || '';
+                autoEl('autoCFToken').value = s.cf_api_token || '';
+                autoEl('autoHTTPTimeout').value = s.http_timeout || '30s';
+                onAutoScheduleModeChange();
+                onAutoChannelChange();
+                autoMsg('配置来源：' + (j.source === 'file' ? '面板已保存配置（加密）' : '容器 .env 默认值，尚未在面板保存'), '');
+            } catch (e) {
+                autoMsg('读取配置失败：' + e.message, 'error');
+            }
+        }
+
+        function collectAutoSettings() {
+            const c = autoSettingsCache || {};
+            const daily = autoEl('autoScheduleMode').value === 'daily';
+            return {
+                auto_enabled: autoEl('autoEnabled').checked,
+                auto_interval: autoEl('autoInterval').value.trim() || '6h',
+                auto_at: daily ? autoEl('autoAt').value.trim() : '',
+                run_on_start: autoEl('autoRunOnStart').checked,
+                scan_mode: autoEl('autoScanMode').value,
+                scan_iptype: c.scan_iptype || '4',
+                scan_port: autoEl('autoScanPort').value.trim(),
+                scan_threads: autoEl('autoScanThreads').value.trim(),
+                scan_delay: autoEl('autoScanDelay').value.trim(),
+                scan_speed_limit: c.scan_speed_limit || '10',
+                scan_speed_min: c.scan_speed_min || '1',
+                scan_rows: autoEl('autoScanRows').value.trim(),
+                scan_timeout: autoEl('autoScanTimeout').value.trim() || '45m',
+                scan_dry_run: autoEl('autoDryRun').checked,
+                channel: autoEl('autoChannel').value,
+                panel_url: autoEl('autoPanelURL').value.trim(),
+                panel_password: autoEl('autoPanelPassword').value,
+                panel_api_key: autoEl('autoPanelAPIKey').value,
+                api_base: autoEl('autoAPIBase').value.trim(),
+                cf_account_id: autoEl('autoCFAccount').value.trim(),
+                cf_namespace_id: autoEl('autoCFNamespace').value.trim(),
+                cf_api_token: autoEl('autoCFToken').value,
+                max_ips: parseInt(autoEl('autoMaxIPs').value, 10) || 100,
+                set_submode: autoEl('autoSetSubMode').checked,
+                http_timeout: autoEl('autoHTTPTimeout').value.trim() || '30s'
+            };
+        }
+
+        async function refreshAutoStatus() {
+            try {
+                const j = await fetch('/api/auto/status').then(r => r.json());
+                if (!j.ok) return;
+                const st = j.state || {}, last = j.last_run || {};
+                let next = '—';
+                if (st.next_run) {
+                    const d = new Date(st.next_run);
+                    next = isNaN(d.getTime()) ? st.next_run : d.toLocaleString('zh-CN');
+                }
+                let text = '调度：' + (st.auto_enabled ? '已启用' : '已关闭') +
+                    ' ｜ 通道：' + (st.channel || '—') + ' ｜ 下次运行：' + next;
+                if (st.running || j.trigger_pending) text += ' ｜ ⏳ 运行中 / 已排队';
+                if (last.time) {
+                    text += '\n上次：' + (last.report || last.error || '完成') +
+                        '（' + (last.scan_ips || 0) + ' 个 IP，耗时 ' + (last.duration || '—') + '）';
+                }
+                autoMsg(text, last.error ? 'error' : 'success');
+                const el = autoEl('autoStatusText');
+                if (el) el.style.whiteSpace = 'pre-line';
+            } catch (e) { /* keep last status */ }
+        }
+
+        async function saveAutoSettings() {
+            try {
+                const j = await autoPost('/api/auto/config', collectAutoSettings());
+                if (!j.ok) return autoMsg('保存失败：' + j.error, 'error');
+                autoMsg(j.message, 'success');
+                await loadAutoConfig();
+                autoMsg('✅ ' + j.message, 'success');
+                setTimeout(refreshAutoStatus, 2500);
+            } catch (e) { autoMsg('保存失败：' + e.message, 'error'); }
+        }
+
+        async function testAutoConnection() {
+            autoMsg('正在测试连接…', '');
+            try {
+                const j = await autoPost('/api/auto/test', collectAutoSettings());
+                autoMsg(j.ok ? '✅ ' + j.message : '❌ ' + j.error, j.ok ? 'success' : 'error');
+            } catch (e) { autoMsg('❌ 测试失败：' + e.message, 'error'); }
+        }
+
+        async function runAutoOnce() {
+            try {
+                const j = await autoPost('/api/auto/run', {});
+                autoMsg(j.ok ? '⏳ ' + j.message : '❌ ' + j.error, j.ok ? '' : 'error');
+                setTimeout(refreshAutoStatus, 3000);
+            } catch (e) { autoMsg('❌ 触发失败：' + e.message, 'error'); }
+        }
+        /* ===== /CFNext 自动任务 ===== */
     </script>
 </body>
 

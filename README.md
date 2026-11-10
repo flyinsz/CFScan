@@ -1,5 +1,15 @@
 # CFData-Web
 
+> **本 fork 的 `docker` 分支新增：Docker 化 + 定时自动优选 + CFNext 自动上报 + Web 配置面板。**
+>
+> - 构建：`./build.sh`（交叉编译 linux/amd64 静态二进制）→ `docker compose up -d --build`；也可直接用 `Dockerfile`（golang 多阶段）。
+> - 面板：打开 `http://<NAS>:13335`，点右上角 **🚀**，进入「CFNext 定时自动优选与上报」。
+> - 定时：可启用/关闭定时任务，选择「按间隔」（如 `6h`）或「每日定点」（如 `08:30`），配置扫描方式、线程、延迟、结果行数、超时；支持「立即运行一次」。
+> - 上报：支持 `panel`（CFNext 面板 API）、`kv`（Cloudflare KV API）、`auto`（面板优先、失败回退 KV）、`dry`（只扫描）。CFNext 3.x 的 API 入口 `/<uuid>` 从控制台 `APIPATH` 自动发现，也可手动指定 `CFNEXT_API_BASE`。
+> - 保存即生效：配置写入 `/data/auto-config.json`，密码 / Token 用 AES-GCM 加密（密钥 `/data/.auto.key`）；调度器 2 秒内热加载，无需重启容器。写入前备份远端配置到 `/data/backups/`，写后回读校验。
+> - API：`GET/POST /api/auto/config`、`GET /api/auto/status`、`POST /api/auto/run`、`POST /api/auto/test`。
+> - 首次部署请用 `.env.example` 生成 `.env`（含密钥，禁止提交）。Web 认证建议启用 `WEB_USER` / `WEB_PASS`。
+
 CFData-Web 是一个基于 Go 的 Cloudflare IP 测试与筛选工具，提供本地 Web 与 CLI 两种使用方式，支持官方 IP 段扫描、非标目标测试、测速、结果筛选、导出和 GitHub 上传。
 
 [在线演示站](https://cfdata-demo.cce.de5.net/) 仅使用浏览器内虚拟数据，用于预览界面与交互；真实使用请下载正式版本。

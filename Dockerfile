@@ -2,6 +2,7 @@ FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY combined_refactor/ /src/combined_refactor/
 COPY auto/ /src/auto/
+COPY shared/ /src/shared/
 RUN cd /src/combined_refactor \
  && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/cfscan . \
  && cd /src/auto \

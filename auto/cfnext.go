@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	autoconf "cfscan/shared"
 )
 
 type Reporter struct {
@@ -193,18 +195,16 @@ func (r *Reporter) reportPanel(ctx context.Context, fresh []PreferredIP) (string
 	if r.cfg.PanelAPIKey != "" {
 		apiHeaders["X-CF-Api"] = r.cfg.PanelAPIKey
 	}
-	form := url.Values{"password": {r.cfg.PanelPassword}}.Encode()
-	loginBody, status, err := r.do(ctx, http.MethodPost, base+"/login", []byte(form), map[string]string{
-		"Content-Type": "application/x-www-form-urlencoded",
-	})
+	// CFNext 3.x serves the admin UI at /<L> but the API at /<uuid>/api/...
+	// Login is always performed (session cookie) and the API base is discovered
+	// from the console page unless CFNEXT_API_BASE is set explicitly.
+	apiBase, err := autoconf.DiscoverAPIBase(ctx, r.client, base, r.cfg.PanelPassword, r.cfg.APIBase)
 	if err != nil {
-		return "", fmt.Errorf("面板登录失败: %w", err)
+		return "", fmt.Errorf("面板登录 / API 入口发现失败: %w", err)
 	}
-	if status < 200 || status >= 300 {
-		return "", fmt.Errorf("面板登录返回 HTTP %d: %s", status, brief(loginBody))
-	}
+	log.Printf("[cfnext] 面板 API 入口: %s", apiBase)
 
-	apiURL := base + "/api/config"
+	apiURL := apiBase + "/api/config"
 	raw, status, err := r.do(ctx, http.MethodGet, apiURL, nil, apiHeaders)
 	if err != nil {
 		return "", fmt.Errorf("读取面板配置失败: %w", err)

@@ -48,7 +48,20 @@ func setPreferredIPs(cfg CFNextConfig, ips []PreferredIP, setSubMode bool) error
 	}
 	cfg["preferredIPs"] = json.RawMessage(b)
 	if setSubMode {
+		// CFNext 3.x reads optimizer.subMode; keep the legacy top-level key too.
 		cfg["subMode"] = json.RawMessage(`"custom"`)
+		opt := map[string]json.RawMessage{}
+		if raw, ok := cfg["optimizer"]; ok && string(raw) != "null" {
+			if err := json.Unmarshal(raw, &opt); err != nil || opt == nil {
+				opt = map[string]json.RawMessage{}
+			}
+		}
+		opt["subMode"] = json.RawMessage(`"custom"`)
+		ob, err := json.Marshal(opt)
+		if err != nil {
+			return err
+		}
+		cfg["optimizer"] = ob
 	}
 	return nil
 }

@@ -258,6 +258,7 @@ func main() {
 		_, _ = w.Write(data)
 	}))
 	http.HandleFunc("/ws", requireAuth(handleWebSocket))
+	registerAutoAPI()
 
 	addr := fmt.Sprintf(":%d", listenPort)
 	displayHost := "localhost"

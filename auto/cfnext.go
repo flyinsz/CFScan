@@ -245,11 +245,17 @@ func (r *Reporter) reportPanel(ctx context.Context, fresh []PreferredIP) (string
 		OK  bool   `json:"ok"`
 		Msg string `json:"msg"`
 	}
-	_ = json.Unmarshal(resp, &ack)
-	if !ack.OK && strings.TrimSpace(string(resp)) != "" {
-		log.Printf("[cfnext] 面板保存返回未确认: %s", brief(resp))
+	if err := json.Unmarshal(resp, &ack); err == nil && !ack.OK {
+		msg := strings.TrimSpace(ack.Msg)
+		if msg == "" {
+			msg = brief(resp)
+		}
+		return "", fmt.Errorf("面板保存失败: %s", msg)
 	}
-	return fmt.Sprintf("panel: 原有 %d 条 / 新增 %d 条 / 共 %d 条", len(remote), added, len(merged)), nil
+	if strings.TrimSpace(string(resp)) == "" {
+		log.Printf("[cfnext] 面板保存返回空响应，未能确认，请复核")
+	}
+	return fmt.Sprintf("panel: 原有 %d 条 / 新增 %d 条 / 共 %d 条，面板已确认", len(remote), added, len(merged)), nil
 }
 
 func extractPanelConfig(raw []byte) []byte {

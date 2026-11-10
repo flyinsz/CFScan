@@ -2434,7 +2434,7 @@
                             <option value="dry">关闭上报（仅扫描）</option>
                         </select>
                     </div>
-                    <div class="modal-field"><label>最大优选 IP 数</label><input id="autoMaxIPs" type="text"></div>
+                    <div class="modal-field"><label>最大优选 IP 数</label><input id="autoMaxIPs" type="text"><small style="display:block;margin-top:4px;line-height:1.4;opacity:.7">建议 20：CFNext 只消费列表头部约 20 个 IP，每次最新扫描结果自动置顶</small></div>
                     <div class="modal-field full"><label>面板地址（登录入口）</label><input id="autoPanelURL" type="text" placeholder="https://cfn.vipchanel.com/donny-admin"></div>
                     <div class="modal-field"><label>管理员密码</label><input id="autoPanelPassword" type="password" autocomplete="new-password"></div>
                     <div class="modal-field"><label>API 基址（留空自动发现）</label><input id="autoAPIBase" type="text" placeholder="自动从控制台读取 APIPATH"></div>
@@ -6885,7 +6885,7 @@
                 autoEl('autoScanTimeout').value = s.scan_timeout || '45m';
                 autoEl('autoDryRun').checked = !!s.scan_dry_run;
                 autoEl('autoChannel').value = s.channel || 'kv';
-                autoEl('autoMaxIPs').value = s.max_ips || 100;
+                autoEl('autoMaxIPs').value = s.max_ips || 20;
                 autoEl('autoPanelURL').value = s.panel_url || '';
                 autoEl('autoPanelPassword').value = s.panel_password || '';
                 autoEl('autoAPIBase').value = s.api_base || '';
@@ -6929,7 +6929,7 @@
                 cf_account_id: autoEl('autoCFAccount').value.trim(),
                 cf_namespace_id: autoEl('autoCFNamespace').value.trim(),
                 cf_api_token: autoEl('autoCFToken').value,
-                max_ips: parseInt(autoEl('autoMaxIPs').value, 10) || 100,
+                max_ips: parseInt(autoEl('autoMaxIPs').value, 10) || 20,
                 set_submode: autoEl('autoSetSubMode').checked,
                 http_timeout: autoEl('autoHTTPTimeout').value.trim() || '30s'
             };

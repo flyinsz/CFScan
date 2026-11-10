@@ -68,7 +68,7 @@ func Defaults() Settings {
 		ScanDelay: "300", ScanSpeedLimit: "10", ScanSpeedMin: "1", ScanRows: "20",
 		ScanTimeout: "45m", ScanDryRun: false,
 		Channel: "kv", PanelURL: "https://cfn.vipchanel.com/donny-admin",
-		MaxIPs: 100, SetSubMode: false, HTTPTimeout: "30s",
+		MaxIPs: 20, SetSubMode: false, HTTPTimeout: "30s",
 	}
 }
 

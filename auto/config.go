@@ -142,7 +142,7 @@ func loadConfig() (Config, error) {
 		PanelPassword:  env("CFNEXT_PASSWORD", ""),
 		PanelAPIKey:    env("CFNEXT_API_KEY", ""),
 		APIBase:        strings.TrimRight(env("CFNEXT_API_BASE", ""), "/"),
-		MaxIPs:         envInt("CFNEXT_MAX_IPS", 100),
+		MaxIPs:         envInt("CFNEXT_MAX_IPS", 20),
 		SetSubMode:     envBool("CFNEXT_SET_SUBMODE", true),
 		HTTPTimeout:    envDur("HTTP_TIMEOUT", 30*time.Second),
 	}

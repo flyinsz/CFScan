@@ -37,7 +37,7 @@ func TestStoreEncryptsSecrets(t *testing.T) {
 	if got.PanelPassword != "988998" || got.CFToken != "secret-token" || got.PanelAPIKey != "gate-key" {
 		t.Fatalf("roundtrip mismatch: %+v", got)
 	}
-	if got.MaxIPs != 100 || got.AutoInterval != "6h" {
+	if got.MaxIPs != Defaults().MaxIPs || got.AutoInterval != "6h" {
 		t.Fatalf("non-secret fields lost: %+v", got)
 	}
 }

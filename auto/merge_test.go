@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -33,17 +34,17 @@ func TestParseScanResultsEnvLiteralNewline(t *testing.T) {
 	}
 }
 
-func TestMergeAppendDedup(t *testing.T) {
+func TestMergeFreshFirstAndDedup(t *testing.T) {
 	remote := []PreferredIP{{IP: "1.1.1.1", Port: 443, Name: "优选1"}}
 	fresh := []PreferredIP{{IP: "1.1.1.1", Port: 443}, {IP: "1.0.0.1", Port: 443}}
-	got, added := mergePreferredIPs(remote, fresh, 100, false)
-	if added != 1 || len(got) != 2 {
-		t.Fatalf("added=%d len=%d got=%+v", added, len(got), got)
+	got, kept := mergePreferredIPs(remote, fresh, 100, false)
+	if kept != 2 || len(got) != 2 {
+		t.Fatalf("kept=%d len=%d got=%+v", kept, len(got), got)
 	}
-	if got[0].Name != "优选1" || got[1].Name != "优选2" {
-		t.Fatalf("names not preserved/generated: %+v", got)
+	if got[0].IP != "1.1.1.1" || got[0].Name != "优选1" {
+		t.Fatalf("fresh entry must be first and keep its name: %+v", got[0])
 	}
-	if got[1].IP != "1.0.0.1" {
+	if got[1].IP != "1.0.0.1" || got[1].Name != "优选2" {
 		t.Fatalf("unexpected entry: %+v", got[1])
 	}
 }
@@ -51,13 +52,35 @@ func TestMergeAppendDedup(t *testing.T) {
 func TestMergeMaxAndOverwrite(t *testing.T) {
 	remote := []PreferredIP{{IP: "1.1.1.1", Port: 443, Name: "old"}}
 	fresh := []PreferredIP{{IP: "2.2.2.2", Port: 443}, {IP: "3.3.3.3", Port: 443}}
-	got, _ := mergePreferredIPs(remote, fresh, 2, false)
-	if len(got) != 2 {
-		t.Fatalf("max not applied: %+v", got)
+	got, kept := mergePreferredIPs(remote, fresh, 2, false)
+	if len(got) != 2 || kept != 2 || got[0].IP != "2.2.2.2" || got[1].IP != "3.3.3.3" {
+		t.Fatalf("cap must keep the fresh head, not the old tail: %+v kept=%d", got, kept)
 	}
-	got, added := mergePreferredIPs(remote, fresh, 0, true)
-	if len(got) != 2 || added != 2 || got[0].IP != "2.2.2.2" {
-		t.Fatalf("overwrite failed: %+v added=%d", got, added)
+	got, kept = mergePreferredIPs(remote, fresh, 0, true)
+	if len(got) != 2 || kept != 2 || got[0].IP != "2.2.2.2" {
+		t.Fatalf("overwrite failed: %+v kept=%d", got, kept)
+	}
+}
+
+// Regression: 100 stale entries + 20 freshly scanned entries with a cap of 100
+// used to discard all 20 new IPs (out[:max] kept the old head).
+func TestMergeCapKeepsFreshResults(t *testing.T) {
+	remote := make([]PreferredIP, 100)
+	for i := range remote {
+		remote[i] = PreferredIP{IP: fmt.Sprintf("10.0.%d.%d", i/250, i%250+1), Port: 443, Name: fmt.Sprintf("优选%d", i+1)}
+	}
+	fresh := make([]PreferredIP, 20)
+	for i := range fresh {
+		fresh[i] = PreferredIP{IP: fmt.Sprintf("104.19.%d.%d", i, i+1), Port: 443}
+	}
+	got, kept := mergePreferredIPs(remote, fresh, 100, false)
+	if kept != 20 {
+		t.Fatalf("all 20 fresh IPs must survive the cap, kept=%d", kept)
+	}
+	for i := range fresh {
+		if got[i].IP != fresh[i].IP {
+			t.Fatalf("index %d: got %s, want fresh %s", i, got[i].IP, fresh[i].IP)
+		}
 	}
 }
 

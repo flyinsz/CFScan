@@ -143,10 +143,10 @@ func (r *Reporter) reportKV(ctx context.Context, fresh []PreferredIP) (string, e
 
 	if err := r.verifyKV(ctx, merged, u, h); err != nil {
 		// KV is eventually consistent; do not roll back automatically. Backup is on disk.
-		return fmt.Sprintf("kv: 已提交，原有 %d 条 / 新增 %d 条 / 共 %d 条；回读校验: %v（KV 最终一致，稍后可复核）",
+		return fmt.Sprintf("kv: 已提交，原有 %d 条 / 本次保留 %d 条 / 共 %d 条；回读校验: %v（KV 最终一致，稍后可复核）",
 			len(remote), added, len(merged), err), nil
 	}
-	return fmt.Sprintf("kv: 原有 %d 条 / 新增 %d 条 / 共 %d 条，回读校验通过", len(remote), added, len(merged)), nil
+	return fmt.Sprintf("kv: 原有 %d 条 / 本次保留 %d 条 / 共 %d 条，回读校验通过", len(remote), added, len(merged)), nil
 }
 
 func (r *Reporter) verifyKV(ctx context.Context, want []PreferredIP, u string, h map[string]string) error {
@@ -255,7 +255,7 @@ func (r *Reporter) reportPanel(ctx context.Context, fresh []PreferredIP) (string
 	if strings.TrimSpace(string(resp)) == "" {
 		log.Printf("[cfnext] 面板保存返回空响应，未能确认，请复核")
 	}
-	return fmt.Sprintf("panel: 原有 %d 条 / 新增 %d 条 / 共 %d 条，面板已确认", len(remote), added, len(merged)), nil
+	return fmt.Sprintf("panel: 原有 %d 条 / 本次保留 %d 条 / 共 %d 条，面板已确认", len(remote), added, len(merged)), nil
 }
 
 func extractPanelConfig(raw []byte) []byte {

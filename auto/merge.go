@@ -127,16 +127,22 @@ func extractIPPort(s string) (string, int, bool) {
 	return "", 0, false
 }
 
-// mergePreferredIPs appends and de-duplicates by ip:port. Remote entries keep their names.
+// mergePreferredIPs puts the latest scan results at the head of preferredIPs.
+// CFNext truncates the node list (cpuLimit / nodeLimit / 内置·保底 fill), so only
+// the first ~20 entries ever reach a subscription. Appending fresh results and
+// truncating the tail silently discarded every newly scanned IP.
+// The second return value is how many fresh entries survived the final cap.
 func mergePreferredIPs(remote, fresh []PreferredIP, max int, overwrite bool) ([]PreferredIP, int) {
-	base := remote
-	if overwrite {
-		base = nil
+	keyOf := func(p PreferredIP) string { return p.IP + ":" + strconv.Itoa(p.Port) }
+	names := make(map[string]string, len(remote))
+	for _, p := range remote {
+		names[keyOf(p)] = p.Name
 	}
-	seen := make(map[string]bool, len(base)+len(fresh))
-	out := make([]PreferredIP, 0, len(base)+len(fresh))
+	seen := make(map[string]bool, len(remote)+len(fresh))
+	freshKeys := make(map[string]bool, len(fresh))
+	out := make([]PreferredIP, 0, len(remote)+len(fresh))
 	add := func(p PreferredIP) bool {
-		key := p.IP + ":" + strconv.Itoa(p.Port)
+		key := keyOf(p)
 		if seen[key] {
 			return false
 		}
@@ -144,20 +150,30 @@ func mergePreferredIPs(remote, fresh []PreferredIP, max int, overwrite bool) ([]
 		out = append(out, p)
 		return true
 	}
-	for _, p := range base {
+	for i, p := range fresh {
+		key := keyOf(p)
+		freshKeys[key] = true
+		if p.Name == "" {
+			p.Name = names[key] // keep the existing label when the IP is already known
+		}
+		if p.Name == "" {
+			p.Name = fmt.Sprintf("优选%d", i+1)
+		}
 		add(p)
 	}
-	added := 0
-	for _, p := range fresh {
-		if p.Name == "" {
-			p.Name = fmt.Sprintf("优选%d", len(out)+1)
-		}
-		if add(p) {
-			added++
+	if !overwrite {
+		for _, p := range remote {
+			add(p)
 		}
 	}
 	if max > 0 && len(out) > max {
 		out = out[:max]
 	}
-	return out, added
+	kept := 0
+	for _, p := range out {
+		if freshKeys[keyOf(p)] {
+			kept++
+		}
+	}
+	return out, kept
 }
